@@ -31,3 +31,25 @@ if table_name not in existing_tables:
     print(f"Table '{table_name}' created!")
 else:
     print(f"Table '{table_name}' already exists.")
+
+table_name = "file"
+existing_tables = [table.name for table in dynamodb.tables.all()]
+if table_name not in existing_tables:
+    print(f"Creating table '{table_name}'...")
+    table = dynamodb.create_table(
+        TableName=table_name,
+        KeySchema=[
+            {'AttributeName': 'filename', 'KeyType': 'HASH'}
+        ],
+        AttributeDefinitions=[
+            {'AttributeName': 'filename', 'AttributeType': 'S'}
+        ],
+        ProvisionedThroughput={
+            'ReadCapacityUnits': 5,
+            'WriteCapacityUnits': 5
+        }
+    )
+    table.wait_until_exists()
+    print(f"Table '{table_name}' created!")
+else:
+    print(f"Table '{table_name}' already exists.")
