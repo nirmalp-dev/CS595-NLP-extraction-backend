@@ -1,10 +1,14 @@
+import os
+import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from starlette.responses import JSONResponse
-import os
-from app.storage import s3_client, FILES_TABLE
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Query
+
 from app.config import settings
+from app.document.download import get_file_content
+from app.models import FileModel, ResultModel
+from app.openai import summarize_text_with_openai
+from app.storage import s3_client, FILES_TABLE, SUMMARY_TABLE
 
 router = APIRouter(prefix="/document", tags=["Upload"])
 
@@ -19,15 +23,33 @@ async def upload_file(file: UploadFile = File(...), username: str = "anonymous")
         raise HTTPException(status_code=400, detail="Only .txt and .pdf files are allowed")
     try:
         # Upload to S3
-        s3_client.upload_fileobj(file.file, settings.S3_BUCKET, file.filename)
+        file_uuid = str(uuid.uuid4())
+        # Upload to S3/MinIO with custom metadata
+        s3_client.upload_fileobj(
+            file.file,
+            settings.S3_BUCKET,
+            file.filename,
+            ExtraArgs={
+                "Metadata": {
+                    "uuid": file_uuid,
+                    "uploader": username,
+                    "filename": file.filename,
+                },
+                "ContentType": file.content_type
+            }
+        )
         # Add metadata to DynamoDB
-        FILES_TABLE.put_item(Item={
-            "filename": file.filename,
-            "uploaded_at": datetime.utcnow().isoformat(),
-            "uploader": username,
-            "content_type": file.content_type
-        })
-        return JSONResponse({"message": f"File '{file.filename}' uploaded and recorded."})
+        file_record = FileModel(
+            uuid=file_uuid,
+            filename=file.filename,
+            uploaded_at=datetime.now().isoformat(),
+            uploader=username,
+            status="uploaded",
+            content_type=file.content_type
+        )
+        # Add metadata to DynamoDB
+        FILES_TABLE.put_item(Item=file_record.model_dump())
+        return file_record
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -36,7 +58,67 @@ async def list_uploaded_files():
     try:
         response = FILES_TABLE.scan()
         items = response.get("Items", [])
-        return {"files": items}
+        files = [FileModel(**item) for item in items]
+        return files
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.post("/process")
+async def process_document(request: Request):
+    payload = await request.json()
+    print("request to process document: ", payload)
+    try:
+        record = payload["Records"][0]
+        bucket = record["s3"]["bucket"]["name"]
+        key = record["s3"]["object"]["key"]
+        metadata = record["s3"]["object"]["userMetadata"]
+    except (KeyError, IndexError):
+        raise HTTPException(status_code=400, detail="Invalid event structure")
+    try:
+        file_content = get_file_content(bucket, key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download file: {e}")
+    summary = summarize_text_with_openai(file_content)
+    # summary = None
+    doc_uuid = metadata.get("X-Amz-Meta-Uuid")
+    doc_filename = metadata.get("X-Amz-Meta-Filename")
+    doc_uploader = metadata.get("X-Amz-Meta-Uploader")
+    if not doc_uuid:
+        raise HTTPException(status_code=400, detail="UUID not found in metadata")
+
+    result_record = ResultModel(
+        uuid=doc_uuid,
+        filename=doc_filename,
+        summary=summary,
+        processed_at=datetime.now().isoformat()
+    )
+    try:
+        SUMMARY_TABLE.put_item(Item=result_record.model_dump())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save summary: {e}")
+
+    # Update status in files table
+    try:
+        FILES_TABLE.update_item(
+            Key={"uuid": doc_uuid},
+            UpdateExpression="SET #s = :s, processed_at = :t",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": "processed", ":t": datetime.now().isoformat()}
+        )
+        print("Document processed successfully! uuid: ", doc_uuid)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update file status: {e}")
+
+    return result_record
+
+@router.get("/result", response_model=ResultModel)
+async def get_result(uuid: str = Query(..., description="Document UUID")):
+    try:
+        response = SUMMARY_TABLE.get_item(Key={"uuid": uuid})
+        item = response.get("Item")
+        if not item:
+            raise HTTPException(status_code=404, detail=f"No result found for uuid: {uuid}")
+        return ResultModel(**item)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

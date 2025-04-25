@@ -20,3 +20,4 @@ dynamodb = boto3.resource(
 )
 USER_TABLE = dynamodb.Table("users")
 FILES_TABLE = dynamodb.Table("file")
+SUMMARY_TABLE = dynamodb.Table("document_results")
