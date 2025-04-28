@@ -11,7 +11,7 @@ def summarize_text_with_openai(text, model="gpt-4o-mini", max_tokens=150, temper
         "model": model,
         "messages": [
             {"role": "system",
-             "content": "You are a helpful assistant for text summarization of medical report like lab reports, clinical notes, radiology reports, pathology reports, etc."},
+             "content": "You are a healthcare expert. Your main task is to analyze the report and provide a structured output containing 3 sections. 1. summary: Report summarization in 100 words 2. conditions: List of conditions detected in the report 3. severity: severity of the conditions detected in the report"},
             {"role": "user", "content": f"Summarize the following text:\n\n{text}"}
         ],
         "max_tokens": max_tokens,
