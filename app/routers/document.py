@@ -79,7 +79,14 @@ async def process_document(request: Request):
         file_content = get_file_content(bucket, key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to download file: {e}")
-    summary = summarize_text_with_openai(file_content)
+    # Get structured analysis from OpenAI
+    analysis_result = summarize_text_with_openai(file_content)
+        
+    # Extract individual fields from the returned dictionary
+    summary = analysis_result.get("summary", "")
+    conditions = analysis_result.get("conditions", [])
+    severity = analysis_result.get("severity", "")
+
     # summary = None
     doc_uuid = metadata.get("X-Amz-Meta-Uuid")
     doc_filename = metadata.get("X-Amz-Meta-Filename")
@@ -87,12 +94,15 @@ async def process_document(request: Request):
     if not doc_uuid:
         raise HTTPException(status_code=400, detail="UUID not found in metadata")
 
+    # Then create the result record with the individual fields
     result_record = ResultModel(
         uuid=doc_uuid,
         filename=doc_filename,
         summary=summary,
-        processed_at=datetime.now().isoformat()
-    )
+        conditions=conditions,
+        severity=severity,
+    processed_at=datetime.now().isoformat()
+)
     try:
         SUMMARY_TABLE.put_item(Item=result_record.model_dump())
     except Exception as e:
