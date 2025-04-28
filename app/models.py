@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from pydantic import BaseModel, EmailStr
 
@@ -25,4 +25,6 @@ class ResultModel(BaseModel):
     uuid: str
     filename: str
     summary: Optional[str] = None
-    processed_at: str
+    conditions: Optional[List[str]] = None
+    severity: Optional[str] = None
+    processed_at: Optional[str] = None
