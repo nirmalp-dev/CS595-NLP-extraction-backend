@@ -7,8 +7,10 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Query
 from app.config import settings
 from app.document.download import get_file_content
 from app.models import FileModel, ResultModel
-from app.openai import summarize_text_with_openai
+from app.openai import analyze_medical_report
+# from app.imo_tokenizer_backend import analyze_medical_report
 from app.storage import s3_client, FILES_TABLE, SUMMARY_TABLE
+from urllib.parse import unquote_plus
 
 router = APIRouter(prefix="/document", tags=["Upload"])
 
@@ -66,12 +68,11 @@ async def list_uploaded_files():
 
 @router.post("/process")
 async def process_document(request: Request):
-    payload = await request.json()
-    print("request to process document: ", payload)
     try:
+        payload = await request.json()
         record = payload["Records"][0]
         bucket = record["s3"]["bucket"]["name"]
-        key = record["s3"]["object"]["key"]
+        key = unquote_plus(record["s3"]["object"]["key"])
         metadata = record["s3"]["object"]["userMetadata"]
     except (KeyError, IndexError):
         raise HTTPException(status_code=400, detail="Invalid event structure")
@@ -79,18 +80,15 @@ async def process_document(request: Request):
         file_content = get_file_content(bucket, key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to download file: {e}")
-    # Get structured analysis from OpenAI
-    analysis_result = summarize_text_with_openai(file_content)
-        
-    # Extract individual fields from the returned dictionary
-    summary = analysis_result.get("summary", "")
-    conditions = analysis_result.get("conditions", [])
-    severity = analysis_result.get("severity", "")
+
+    try:
+        analysis_result = analyze_medical_report(file_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
 
     # summary = None
     doc_uuid = metadata.get("X-Amz-Meta-Uuid")
     doc_filename = metadata.get("X-Amz-Meta-Filename")
-    doc_uploader = metadata.get("X-Amz-Meta-Uploader")
     if not doc_uuid:
         raise HTTPException(status_code=400, detail="UUID not found in metadata")
 
@@ -98,11 +96,15 @@ async def process_document(request: Request):
     result_record = ResultModel(
         uuid=doc_uuid,
         filename=doc_filename,
-        summary=summary,
-        conditions=conditions,
-        severity=severity,
-    processed_at=datetime.now().isoformat()
-)
+        summary=analysis_result.get("summary", ""),
+        severity=analysis_result.get("severity", ""),
+        conditions=analysis_result.get("conditions", []),
+        labs=analysis_result.get("labs", []),
+        procedures=analysis_result.get("procedures", []),
+        medications=analysis_result.get("medications", []),
+        processed_at=datetime.now().isoformat()
+    )
+
     try:
         SUMMARY_TABLE.put_item(Item=result_record.model_dump())
     except Exception as e:
